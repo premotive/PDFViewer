@@ -31,29 +31,6 @@ def test_toolbar_has_zoom_controls(qapp):
     assert toolbar.zoom_combo is not None
 
 
-def test_toolbar_has_page_navigator(qapp):
-    window = QMainWindow()
-    toolbar = ToolBar(window)
-    assert toolbar.page_spinbox is not None
-    assert toolbar.page_total_label is not None
-
-
-def test_toolbar_set_page_count(qapp):
-    window = QMainWindow()
-    toolbar = ToolBar(window)
-    toolbar.set_page_count(42)
-    assert toolbar.page_spinbox.maximum() == 42
-    assert "42" in toolbar.page_total_label.text()
-
-
-def test_toolbar_set_current_page(qapp):
-    window = QMainWindow()
-    toolbar = ToolBar(window)
-    toolbar.set_page_count(10)
-    toolbar.set_current_page(5)
-    assert toolbar.page_spinbox.value() == 5
-
-
 def test_save_disabled_when_clean(qapp):
     window = QMainWindow()
     toolbar = ToolBar(window)
@@ -66,3 +43,26 @@ def test_save_enabled_when_dirty(qapp):
     toolbar = ToolBar(window)
     toolbar.set_dirty(True)
     assert toolbar.save_action.isEnabled()
+
+
+def test_toolbar_has_hamburger(qtbot):
+    toolbar = ToolBar()
+    qtbot.addWidget(toolbar)
+    assert toolbar.hamburger_btn is not None
+
+
+def test_toolbar_hamburger_menu_has_actions(qtbot):
+    toolbar = ToolBar()
+    qtbot.addWidget(toolbar)
+    menu = toolbar.hamburger_btn.menu()
+    assert menu is not None
+    action_texts = [a.text() for a in menu.actions() if a.text()]
+    assert "Undo" in action_texts
+    assert "Redo" in action_texts
+    assert "Toggle Reading/Faithful Mode" in action_texts
+
+
+def test_toolbar_no_page_navigator(qtbot):
+    toolbar = ToolBar()
+    qtbot.addWidget(toolbar)
+    assert not hasattr(toolbar, 'page_spinbox')
