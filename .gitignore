@@ -1,0 +1,6 @@
+dist/
+build/
+installer_output/
+*.pyc
+__pycache__/
+.superpowers/
