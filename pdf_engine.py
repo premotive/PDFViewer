@@ -312,13 +312,22 @@ class PDFEngine:
 
         return (t_x0, t_y0, t_x1, max_y1)
 
-    def save_edits(self, edits: dict, output_path: Path) -> list[str]:
-        """Save edited spans using white-out + insert. Returns warning messages."""
+    def save_edits(self, edits: dict, output_path: Path, *, block_edits: dict | None = None) -> list[str]:
+        """Save edited spans and blocks using white-out + insert. Returns warning messages."""
         warnings = []
         font_warned = False
 
+        # Determine which blocks have block-level edits (supersede span edits)
+        block_edited = set()
+        if block_edits:
+            block_edited = set(block_edits.keys())
+
+        # --- Span edits (skip spans whose block has a block edit) ---
         pages_to_edit: dict[int, list] = {}
-        for (page_num, _span_id), edit_info in edits.items():
+        for (page_num, span_id_tuple), edit_info in edits.items():
+            block_num = span_id_tuple[0]
+            if (page_num, block_num) in block_edited:
+                continue
             pages_to_edit.setdefault(page_num, []).append(edit_info)
 
         for page_num, page_edits in pages_to_edit.items():
@@ -354,6 +363,65 @@ class PDFEngine:
                         )
 
                 if fontname != edit["font"].lower() and not font_warned:
+                    warnings.append(
+                        "Some fonts were substituted — "
+                        "saved text may look slightly different from the original."
+                    )
+                    font_warned = True
+
+        # --- Block edits ---
+        if block_edits:
+            for (page_num, block_num), edit_info in block_edits.items():
+                page = self._doc[page_num]
+                block_bbox = fitz.Rect(edit_info["block_bbox"])
+                extended_bbox = fitz.Rect(edit_info["extended_bbox"])
+                new_text = edit_info["new_text"]
+                fontname = match_font(edit_info["font"], edit_info["flags"])
+                fontsize = edit_info["size"]
+                align = edit_info.get("align", 0)
+
+                int_color = edit_info["color"]
+                r = ((int_color >> 16) & 0xFF) / 255.0
+                g = ((int_color >> 8) & 0xFF) / 255.0
+                b = (int_color & 0xFF) / 255.0
+                color = (r, g, b)
+
+                # White-out original block area
+                page.draw_rect(block_bbox, color=(1, 1, 1), fill=(1, 1, 1))
+
+                # Try fitting in original block rect
+                overflow = page.insert_textbox(
+                    block_bbox, new_text, fontname=fontname, fontsize=fontsize,
+                    color=color, align=align,
+                )
+
+                # If overflow and extended rect is larger, try that
+                if overflow < 0 and extended_bbox != block_bbox:
+                    page.draw_rect(block_bbox, color=(1, 1, 1), fill=(1, 1, 1))
+                    overflow = page.insert_textbox(
+                        extended_bbox, new_text, fontname=fontname, fontsize=fontsize,
+                        color=color, align=align,
+                    )
+
+                # If still overflow, shrink font
+                if overflow < 0:
+                    use_rect = extended_bbox if extended_bbox != block_bbox else block_bbox
+                    min_size = fontsize * 0.7
+                    current_size = fontsize - 0.5
+                    while current_size >= min_size and overflow < 0:
+                        page.draw_rect(use_rect, color=(1, 1, 1), fill=(1, 1, 1))
+                        overflow = page.insert_textbox(
+                            use_rect, new_text, fontname=fontname, fontsize=current_size,
+                            color=color, align=align,
+                        )
+                        current_size -= 0.5
+                    if overflow < 0:
+                        warnings.append(
+                            f"Text overflow on page {page_num + 1}: "
+                            f"'{new_text[:30]}...' didn't fit in available space"
+                        )
+
+                if fontname != edit_info["font"].lower() and not font_warned:
                     warnings.append(
                         "Some fonts were substituted — "
                         "saved text may look slightly different from the original."

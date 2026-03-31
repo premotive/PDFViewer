@@ -244,3 +244,103 @@ def test_compute_max_block_rect_preserves_x(paragraph_pdf):
     assert result[0] == block["bbox"][0]
     assert result[2] == block["bbox"][2]
     engine.close()
+
+
+def test_save_block_edits(paragraph_pdf, tmp_path):
+    engine = PDFEngine()
+    engine.open(paragraph_pdf)
+    blocks = engine.extract_blocks(0)
+    block = blocks[0]
+    max_rect = engine.compute_max_block_rect(0, block["block_num"])
+
+    block_edits = {
+        (0, block["block_num"]): {
+            "original_text": block["text"],
+            "new_text": "Completely rewritten paragraph with new content.",
+            "block_bbox": block["bbox"],
+            "extended_bbox": max_rect,
+            "font": block["dominant_font"],
+            "size": block["dominant_size"],
+            "color": block["dominant_color"],
+            "flags": block["dominant_flags"],
+            "align": block["align"],
+        }
+    }
+    output = tmp_path / "saved.pdf"
+    warnings = engine.save_edits({}, output, block_edits=block_edits)
+    assert output.exists()
+
+    engine2 = PDFEngine()
+    engine2.open(output)
+    text = engine2.extract_page_text(0)
+    assert "rewritten paragraph" in text.lower()
+    engine2.close()
+    engine.close()
+
+
+def test_save_block_edits_with_alignment(paragraph_pdf, tmp_path):
+    engine = PDFEngine()
+    engine.open(paragraph_pdf)
+    blocks = engine.extract_blocks(0)
+    block = blocks[0]
+    max_rect = engine.compute_max_block_rect(0, block["block_num"])
+
+    block_edits = {
+        (0, block["block_num"]): {
+            "original_text": block["text"],
+            "new_text": "Centered text line.",
+            "block_bbox": block["bbox"],
+            "extended_bbox": max_rect,
+            "font": block["dominant_font"],
+            "size": block["dominant_size"],
+            "color": block["dominant_color"],
+            "flags": block["dominant_flags"],
+            "align": 1,  # center
+        }
+    }
+    output = tmp_path / "saved_center.pdf"
+    warnings = engine.save_edits({}, output, block_edits=block_edits)
+    assert output.exists()
+    engine.close()
+
+
+def test_save_block_edit_supersedes_span_edit(paragraph_pdf, tmp_path):
+    engine = PDFEngine()
+    engine.open(paragraph_pdf)
+    blocks = engine.extract_blocks(0)
+    block = blocks[0]
+    max_rect = engine.compute_max_block_rect(0, block["block_num"])
+    first_span = block["spans"][0]
+
+    span_id = (0, (first_span["block_num"], first_span["line_num"], first_span["span_num"]))
+    span_edits = {
+        span_id: {
+            "original_text": first_span["text"], "new_text": "SPAN EDIT",
+            "original_rect": first_span["bbox"], "font": first_span["font"],
+            "size": first_span["size"], "color": first_span["color"],
+            "flags": first_span["flags"],
+        }
+    }
+    block_edits = {
+        (0, block["block_num"]): {
+            "original_text": block["text"],
+            "new_text": "BLOCK EDIT WINS",
+            "block_bbox": block["bbox"],
+            "extended_bbox": max_rect,
+            "font": block["dominant_font"],
+            "size": block["dominant_size"],
+            "color": block["dominant_color"],
+            "flags": block["dominant_flags"],
+            "align": 0,
+        }
+    }
+    output = tmp_path / "saved_conflict.pdf"
+    warnings = engine.save_edits(span_edits, output, block_edits=block_edits)
+
+    engine2 = PDFEngine()
+    engine2.open(output)
+    text = engine2.extract_page_text(0)
+    assert "BLOCK EDIT WINS" in text
+    assert "SPAN EDIT" not in text
+    engine2.close()
+    engine.close()
