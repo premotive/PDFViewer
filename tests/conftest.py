@@ -116,3 +116,55 @@ def password_pdf(tmp_path):
     )
     doc.close()
     return pdf_path
+
+
+@pytest.fixture
+def paragraph_pdf(tmp_path):
+    """PDF with two paragraph blocks and a gap between them for whitespace tests."""
+    pdf_path = tmp_path / "paragraph.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    # Block 0: paragraph near top
+    page.insert_textbox(
+        fitz.Rect(72, 72, 300, 160),
+        "This is the first paragraph with enough text to span multiple lines.",
+        fontsize=12, fontname="helv", color=(0, 0, 0),
+    )
+    # Block 1: paragraph further down (gap from ~160 to 300 = whitespace)
+    page.insert_textbox(
+        fitz.Rect(72, 300, 300, 380),
+        "Second paragraph starts here.",
+        fontsize=12, fontname="helv", color=(0, 0, 0),
+    )
+    doc.save(str(pdf_path))
+    doc.close()
+    return pdf_path
+
+
+@pytest.fixture
+def two_column_pdf(tmp_path):
+    """PDF with two columns of text that should not constrain each other."""
+    pdf_path = tmp_path / "two_column.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    # Left column block
+    page.insert_textbox(
+        fitz.Rect(72, 72, 280, 150),
+        "Left column paragraph one.",
+        fontsize=11, fontname="helv", color=(0, 0, 0),
+    )
+    # Right column block (no horizontal overlap with left)
+    page.insert_textbox(
+        fitz.Rect(320, 72, 540, 150),
+        "Right column paragraph one.",
+        fontsize=11, fontname="helv", color=(0, 0, 0),
+    )
+    # Left column block 2 (below left column block 1)
+    page.insert_textbox(
+        fitz.Rect(72, 400, 280, 480),
+        "Left column paragraph two.",
+        fontsize=11, fontname="helv", color=(0, 0, 0),
+    )
+    doc.save(str(pdf_path))
+    doc.close()
+    return pdf_path
