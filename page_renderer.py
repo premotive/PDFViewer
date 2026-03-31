@@ -12,7 +12,7 @@ from PySide6.QtGui import QPixmap, QImage, QColor, QBrush, QPen, QFont, QTransfo
 from pdf_engine import PDFEngine
 from render_worker import RenderWorker, RenderRequest, RenderResult
 from text_overlay import OverlayManager, SpanOverlay
-from theme_engine import ThemeEngine
+from theme_engine import ThemeEngine, transform_image_for_theme
 
 PAGE_GAP = 20.0
 
@@ -30,6 +30,7 @@ class PageRenderer(QObject):
         self._view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
 
         self._theme = theme_engine or ThemeEngine()
+        self._apply_viewport_bg()
         self._overlay_manager = OverlayManager(self._scene)
         self._main_engine = main_engine  # Shared with MainWindow
         self._render_worker = RenderWorker()
@@ -147,24 +148,47 @@ class PageRenderer(QObject):
             y += rect.height * self._scale + PAGE_GAP
         self._total_height = y - PAGE_GAP if self._page_rects else 0.0
 
+    def _placeholder_colors(self) -> tuple[QColor, QColor, QColor]:
+        """Derive placeholder fill, border, and text colours from the theme."""
+        bg = self._theme.bg_color
+        dark = bg.lightnessF() < 0.5
+        fill = bg.lighter(115) if dark else bg.darker(110)
+        border = bg.lighter(130) if dark else bg.darker(120)
+        fg = self._theme.font_color
+        text = QColor(bg.red() + (fg.red() - bg.red()) // 3,
+                      bg.green() + (fg.green() - bg.green()) // 3,
+                      bg.blue() + (fg.blue() - bg.blue()) // 3)
+        return fill, border, text
+
     def _create_placeholders(self):
+        ph_fill, ph_border, ph_text = self._placeholder_colors()
+
         for i, rect in enumerate(self._page_rects):
             w = rect.width * self._scale
             h = rect.height * self._scale
             y = self._page_y_offsets[i]
 
             placeholder = QGraphicsRectItem(0, y, w, h)
-            placeholder.setBrush(QBrush(QColor(230, 230, 230)))
-            placeholder.setPen(QPen(QColor(200, 200, 200)))
+            placeholder.setBrush(QBrush(ph_fill))
+            placeholder.setPen(QPen(ph_border))
             placeholder.setZValue(-1)
             self._scene.addItem(placeholder)
             self._placeholder_items[i] = placeholder
 
             label = QGraphicsSimpleTextItem(f"Page {i + 1}")
             label.setFont(QFont("Arial", 14))
-            label.setBrush(QBrush(QColor(150, 150, 150)))
+            label.setBrush(QBrush(ph_text))
             label.setPos(w / 2 - 30, y + h / 2 - 10)
             label.setParentItem(placeholder)
+
+    def _restyle_placeholders(self):
+        ph_fill, ph_border, ph_text = self._placeholder_colors()
+        for placeholder in self._placeholder_items.values():
+            placeholder.setBrush(QBrush(ph_fill))
+            placeholder.setPen(QPen(ph_border))
+            for child in placeholder.childItems():
+                if isinstance(child, QGraphicsSimpleTextItem):
+                    child.setBrush(QBrush(ph_text))
 
     def visible_page_range(self, viewport_rect: QRectF | None = None) -> list[int]:
         if viewport_rect is None:
@@ -260,8 +284,6 @@ class PageRenderer(QObject):
         if page_data:
             if page_data.get("pixmap_item"):
                 self._scene.removeItem(page_data["pixmap_item"])
-            if page_data.get("tint_item"):
-                self._scene.removeItem(page_data["tint_item"])
         self._overlay_manager.clear_page(page_num)
         if page_num in self._placeholder_items:
             self._placeholder_items[page_num].show()
@@ -296,22 +318,24 @@ class PageRenderer(QObject):
         if page_num in self._placeholder_items:
             self._placeholder_items[page_num].hide()
 
-        pixmap = QPixmap.fromImage(result.image)
+        original_image = result.image
+        if self._theme.show_tint:
+            display_image = transform_image_for_theme(
+                original_image, self._theme.bg_color, self._theme.font_color,
+            )
+        else:
+            display_image = original_image
+
+        pixmap = QPixmap.fromImage(display_image)
         pixmap_item = QGraphicsPixmapItem(pixmap)
         pixmap_item.setPos(0, y_offset)
         pixmap_item.setZValue(0)
         self._scene.addItem(pixmap_item)
 
-        w = self._page_rects[page_num].width * self._scale
-        h = self._page_rects[page_num].height * self._scale
-        tint_item = QGraphicsRectItem(0, y_offset, w, h)
-        tint_item.setPen(QPen(Qt.PenStyle.NoPen))
-        tint_item.setBrush(QBrush(self._theme.bg_color))
-        tint_item.setZValue(1)
-        tint_item.setVisible(self._theme.show_tint)
-        self._scene.addItem(tint_item)
-
-        self._loaded_pages[page_num] = {"pixmap_item": pixmap_item, "tint_item": tint_item}
+        self._loaded_pages[page_num] = {
+            "pixmap_item": pixmap_item,
+            "original_image": original_image,
+        }
 
         if result.spans:
             overlays = self._overlay_manager.create_overlays(
@@ -319,34 +343,48 @@ class PageRenderer(QObject):
             )
             if self._theme.show_text_overlays:
                 for ov in overlays:
-                    ov.set_reading_mode(self._theme.font_color)
-            else:
-                for ov in overlays:
-                    ov.set_faithful_mode()
+                    ov.set_reading_mode()
 
     def _apply_theme(self):
+        self._refresh_display(restyle_placeholders=True)
+
+    def _apply_mode(self):
+        self._refresh_display()
+
+    def _refresh_display(self, *, restyle_placeholders: bool = False):
         self._scene.blockSignals(True)
+        self._apply_viewport_bg()
+        if restyle_placeholders:
+            self._restyle_placeholders()
+        self._retransform_loaded_pages()
+        self._update_overlay_mode()
+        self._scene.blockSignals(False)
+        self._scene.update()
+
+    def _update_overlay_mode(self):
+        if self._theme.show_text_overlays:
+            self._overlay_manager.set_reading_mode()
+        else:
+            self._overlay_manager.set_faithful_mode()
+
+    def _apply_viewport_bg(self):
+        """Set the scene and viewport background to contrast with page color."""
+        bg = self._theme.viewport_bg_color
+        self._scene.setBackgroundBrush(QBrush(bg))
+        self._view.setBackgroundBrush(QBrush(bg))
+
+    def _retransform_loaded_pages(self):
+        """Re-apply colour transformation to all loaded page images."""
+        use_transform = self._theme.show_tint
         bg = self._theme.bg_color
         font = self._theme.font_color
         for page_data in self._loaded_pages.values():
-            tint = page_data.get("tint_item")
-            if tint:
-                tint.setBrush(QBrush(bg))
-        if self._theme.show_text_overlays:
-            self._overlay_manager.set_reading_mode(font)
-        self._scene.blockSignals(False)
-        self._scene.update()
-
-    def _apply_mode(self):
-        self._scene.blockSignals(True)
-        show_tint = self._theme.show_tint
-        for page_data in self._loaded_pages.values():
-            tint = page_data.get("tint_item")
-            if tint:
-                tint.setVisible(show_tint)
-        if self._theme.show_text_overlays:
-            self._overlay_manager.set_reading_mode(self._theme.font_color)
-        else:
-            self._overlay_manager.set_faithful_mode()
-        self._scene.blockSignals(False)
-        self._scene.update()
+            original = page_data.get("original_image")
+            pixmap_item = page_data.get("pixmap_item")
+            if original is None or pixmap_item is None:
+                continue
+            if use_transform:
+                display = transform_image_for_theme(original, bg, font)
+            else:
+                display = original
+            pixmap_item.setPixmap(QPixmap.fromImage(display))
