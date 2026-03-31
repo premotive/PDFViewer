@@ -1,6 +1,7 @@
 """Application configuration: load, save, and defaults."""
 
 import json
+import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -18,6 +19,20 @@ class AppConfig:
     window_y: int = 100
     last_opened_file: str = ""
     render_dpi: int = 150
+    sidebar_collapsed: bool = False
+
+
+def get_appdata_dir() -> Path:
+    """Return %APPDATA%/PDFViewer, creating it if needed."""
+    appdata = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    app_dir = appdata / "PDFViewer"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    return app_dir
+
+
+def get_config_path() -> Path:
+    """Return path to config.json in AppData."""
+    return get_appdata_dir() / "config.json"
 
 
 def load_config(path: Path) -> AppConfig:

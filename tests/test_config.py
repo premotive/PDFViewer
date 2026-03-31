@@ -1,6 +1,8 @@
 import json
+import os
 from pathlib import Path
-from config import AppConfig, load_config, save_config
+from unittest.mock import patch
+from config import AppConfig, load_config, save_config, get_appdata_dir, get_config_path
 
 
 def test_default_config_values():
@@ -49,6 +51,22 @@ def test_load_partial_config_fills_defaults(tmp_path):
     assert config.theme == "light"
     assert config.zoom_level == 100
     assert config.render_dpi == 150
+
+
+def test_get_appdata_dir_returns_appdata_path():
+    with patch.dict(os.environ, {"APPDATA": "C:\\Users\\Test\\AppData\\Roaming"}):
+        with patch("pathlib.Path.mkdir"):
+            result = get_appdata_dir()
+            assert result.name == "PDFViewer"
+            assert "AppData" in str(result)
+
+
+def test_get_config_path_inside_appdata():
+    with patch.dict(os.environ, {"APPDATA": "C:\\Users\\Test\\AppData\\Roaming"}):
+        with patch("pathlib.Path.mkdir"):
+            result = get_config_path()
+            assert result.name == "config.json"
+            assert "PDFViewer" in str(result)
 
 
 def test_config_roundtrip_preserves_all_fields(tmp_path):

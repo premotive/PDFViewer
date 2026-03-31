@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, QEvent, QRectF, QPointF
 from PySide6.QtGui import QAction, QColor, QKeySequence, QUndoStack, QPen, QBrush
 
-from config import AppConfig, load_config, save_config
+from config import AppConfig, load_config, save_config, get_config_path
 from pdf_engine import PDFEngine
 from page_renderer import PageRenderer
 from text_overlay import SpanOverlay, SelectionManager
@@ -20,12 +20,19 @@ from editor import EditTracker, BlockEditCommand
 from search import SearchEngine, SearchBar
 from toolbar import ToolBar
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
+CONFIG_PATH = get_config_path()
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # Migrate config from old location if needed
+        old_config = Path(__file__).parent / "config.json"
+        if old_config.exists() and not CONFIG_PATH.exists():
+            import shutil
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(old_config, CONFIG_PATH)
+
         self._config = load_config(CONFIG_PATH)
         self._file_path: Path | None = None
         self._save_timer = QTimer()
@@ -531,7 +538,9 @@ class MainWindow(QMainWindow):
             font.setFamily("Courier")
         edit_item.setFont(font)
         edit_item.setPos(bbox[0] * scale, bbox[1] * scale + y_offset)
-        edit_item.setTextWidth((bbox[2] - bbox[0]) * scale)
+        # Add width padding — Qt font metrics differ from PDF, tight bbox causes wrapping
+        block_width = (bbox[2] - bbox[0]) * scale
+        edit_item.setTextWidth(block_width * 1.15)
         edit_item.setZValue(3)
         edit_item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
         edit_item.setDefaultTextColor(
@@ -540,6 +549,19 @@ class MainWindow(QMainWindow):
 
         self._renderer.scene.addItem(edit_item)
         edit_item.setFocus()
+
+        # Cover original pixmap text — sized to actual edit item bounds
+        actual_rect = edit_item.mapRectToScene(edit_item.boundingRect())
+        # Ensure it at least covers the original bbox
+        cover_rect = actual_rect.united(QRectF(
+            bbox[0] * scale, bbox[1] * scale + y_offset,
+            (bbox[2] - bbox[0]) * scale, (bbox[3] - bbox[1]) * scale,
+        ))
+        bg_cover = QGraphicsRectItem(cover_rect)
+        bg_cover.setPen(QPen(Qt.PenStyle.NoPen))
+        bg_cover.setBrush(QBrush(self._theme_engine.bg_color))
+        bg_cover.setZValue(2.8)
+        self._renderer.scene.addItem(bg_cover)
 
         # Position cursor near click location
         local_pos = edit_item.mapFromScene(click_scene_pos)
@@ -557,6 +579,7 @@ class MainWindow(QMainWindow):
             "max_rect": max_rect,
             "edit_item": edit_item,
             "boundary": boundary,
+            "bg_cover": bg_cover,
             "overlays": block_overlays,
             "original_text": block_data["text"],
         }
@@ -593,6 +616,8 @@ class MainWindow(QMainWindow):
         self._renderer.scene.removeItem(edit_item)
         if edit_data.get("boundary"):
             self._renderer.scene.removeItem(edit_data["boundary"])
+        if edit_data.get("bg_cover"):
+            self._renderer.scene.removeItem(edit_data["bg_cover"])
 
         # Restore overlays
         for ov in edit_data["overlays"]:
@@ -632,6 +657,8 @@ class MainWindow(QMainWindow):
         self._renderer.scene.removeItem(edit_data["edit_item"])
         if edit_data.get("boundary"):
             self._renderer.scene.removeItem(edit_data["boundary"])
+        if edit_data.get("bg_cover"):
+            self._renderer.scene.removeItem(edit_data["bg_cover"])
 
         for ov in edit_data["overlays"]:
             ov._is_editing = False
