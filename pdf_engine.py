@@ -79,6 +79,68 @@ def match_font(font_name: str, flags: int) -> str:
         return "helv"
 
 
+def _detect_alignment(block_bbox, lines) -> int:
+    """Detect text alignment from line positions within a block.
+
+    Returns: 0=left, 1=center, 2=right, 3=justified.
+    """
+    if not lines:
+        return 0
+
+    b_x0, _, b_x1, _ = block_bbox
+    block_width = b_x1 - b_x0
+    if block_width <= 0:
+        return 0
+
+    tolerance = max(block_width * 0.05, 2.0)
+    left_count = 0
+    right_count = 0
+    total = 0
+
+    for line in lines:
+        spans = line.get("spans", [])
+        if not spans:
+            continue
+        total += 1
+        line_x0 = min(s["bbox"][0] for s in spans)
+        line_x1 = max(s["bbox"][2] for s in spans)
+
+        if abs(line_x0 - b_x0) <= tolerance:
+            left_count += 1
+        if abs(line_x1 - b_x1) <= tolerance:
+            right_count += 1
+
+    if total == 0:
+        return 0
+
+    # Justified: most lines touch both edges (exclude the last line which is typically short)
+    if left_count >= total * 0.8 and right_count >= (total - 1) * 0.8 and total > 2:
+        return 3
+
+    if left_count >= total * 0.8:
+        return 0  # left-aligned
+
+    if right_count >= total * 0.8:
+        return 2  # right-aligned
+
+    # Centered: line centers cluster around block center
+    block_center = (b_x0 + b_x1) / 2
+    centered = 0
+    for line in lines:
+        spans = line.get("spans", [])
+        if not spans:
+            continue
+        line_x0 = min(s["bbox"][0] for s in spans)
+        line_x1 = max(s["bbox"][2] for s in spans)
+        line_center = (line_x0 + line_x1) / 2
+        if abs(line_center - block_center) <= tolerance:
+            centered += 1
+    if centered >= total * 0.8:
+        return 1
+
+    return 0  # default left
+
+
 class PDFEngine:
     """Wraps a single fitz.Document for PDF operations."""
 
@@ -156,6 +218,99 @@ class PDFEngine:
                         "span_num": s_idx,
                     })
         return spans
+
+    def extract_blocks(self, page_num: int) -> list[dict]:
+        """Extract block-level data with dominant formatting and alignment."""
+        text_dict = self.extract_text_dict(page_num)
+        blocks = []
+        for b_idx, block in enumerate(text_dict.get("blocks", [])):
+            if block.get("type") != 0:
+                continue
+
+            lines = block.get("lines", [])
+            all_spans = []
+            line_texts = []
+
+            for l_idx, line in enumerate(lines):
+                line_span_texts = []
+                for s_idx, span in enumerate(line.get("spans", [])):
+                    span_data = {
+                        "text": span["text"],
+                        "bbox": span["bbox"],
+                        "font": span["font"],
+                        "size": span["size"],
+                        "color": span["color"],
+                        "flags": span["flags"],
+                        "block_num": b_idx,
+                        "line_num": l_idx,
+                        "span_num": s_idx,
+                    }
+                    all_spans.append(span_data)
+                    line_span_texts.append(span["text"])
+                line_texts.append("".join(line_span_texts))
+
+            text = "\n".join(line_texts)
+
+            # Dominant formatting by character count
+            font_counts: dict[str, int] = {}
+            size_counts: dict[float, int] = {}
+            color_counts: dict[int, int] = {}
+            flags_counts: dict[int, int] = {}
+            for s in all_spans:
+                n = len(s["text"])
+                font_counts[s["font"]] = font_counts.get(s["font"], 0) + n
+                size_counts[s["size"]] = size_counts.get(s["size"], 0) + n
+                color_counts[s["color"]] = color_counts.get(s["color"], 0) + n
+                flags_counts[s["flags"]] = flags_counts.get(s["flags"], 0) + n
+
+            blocks.append({
+                "block_num": b_idx,
+                "bbox": block["bbox"],
+                "text": text,
+                "spans": all_spans,
+                "dominant_font": max(font_counts, key=font_counts.get) if font_counts else "helv",
+                "dominant_size": max(size_counts, key=size_counts.get) if size_counts else 12.0,
+                "dominant_color": max(color_counts, key=color_counts.get) if color_counts else 0,
+                "dominant_flags": max(flags_counts, key=flags_counts.get) if flags_counts else 0,
+                "align": _detect_alignment(block["bbox"], lines),
+            })
+
+        return blocks
+
+    def compute_max_block_rect(self, page_num: int, block_num: int) -> tuple | None:
+        """Compute max rect a block can expand into by detecting whitespace below.
+
+        Returns (x0, y0, x1, max_y1) in PDF coordinates, or None if block not found.
+        Only blocks with horizontal overlap constrain the extension (multi-column safe).
+        """
+        text_dict = self.extract_text_dict(page_num)
+        all_blocks = text_dict.get("blocks", [])
+        if block_num >= len(all_blocks):
+            return None
+
+        target = all_blocks[block_num]
+        t_x0, t_y0, t_x1, t_y1 = target["bbox"]
+
+        page_rect = self._doc[page_num].rect
+        margin = 4  # points
+        max_y1 = page_rect.y1 - margin
+
+        for i, block in enumerate(all_blocks):
+            if i == block_num:
+                continue
+            b_x0, b_y0, b_x1, b_y1 = block["bbox"]
+
+            # Skip blocks with no horizontal overlap
+            if b_x1 <= t_x0 or b_x0 >= t_x1:
+                continue
+
+            # Only consider blocks below the target
+            if b_y0 > t_y1:
+                candidate = b_y0 - margin
+                if candidate < max_y1:
+                    max_y1 = candidate
+
+        return (t_x0, t_y0, t_x1, max_y1)
 
     def save_edits(self, edits: dict, output_path: Path) -> list[str]:
         """Save edited spans using white-out + insert. Returns warning messages."""
