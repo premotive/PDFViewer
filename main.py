@@ -14,7 +14,7 @@ from PySide6.QtGui import QAction, QKeySequence, QUndoStack
 from config import AppConfig, load_config, save_config
 from pdf_engine import PDFEngine
 from page_renderer import PageRenderer
-from text_overlay import SpanOverlay
+from text_overlay import SpanOverlay, SelectionManager
 from theme_engine import ThemeEngine
 from editor import EditTracker, SpanEditCommand
 from search import SearchEngine, SearchBar
@@ -49,12 +49,17 @@ class MainWindow(QMainWindow):
         self._search_highlights = []
         self._current_highlight = None
         self._rubber_band_start = None
+        self._selection_manager = None  # Initialized after renderer is set up
 
         # UI setup
         self.setWindowTitle("PDF Viewer")
         self._setup_ui()
         self._setup_shortcuts()
         self._setup_connections()
+
+        self._selection_manager = SelectionManager(
+            self._renderer.scene, self._renderer.overlay_manager
+        )
 
         # Restore window geometry
         self.resize(self._config.window_width, self._config.window_height)
@@ -440,8 +445,8 @@ class MainWindow(QMainWindow):
                     end = self._renderer.view.mapToScene(event.pos())
                     rect = QRectF(self._rubber_band_start, end).normalized()
                     if rect.width() > 5 and rect.height() > 5:
-                        # Selection handled in Task 12
-                        pass
+                        page_num = self._renderer.current_page()
+                        self._selection_manager.select_rect(rect, page_num)
                     self._rubber_band_start = None
         return super().eventFilter(obj, event)
 
@@ -547,7 +552,10 @@ class MainWindow(QMainWindow):
     def _copy_selection(self):
         if self._active_edit is not None:
             return
-        # Selection copy implemented in Task 12
+        text = self._selection_manager.selected_text()
+        if text:
+            QApplication.clipboard().setText(text)
+            self._status_bar.showMessage(f"Copied {len(text)} characters", 2000)
 
     # --- Drag and drop ---
     def dragEnterEvent(self, event):

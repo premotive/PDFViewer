@@ -138,3 +138,48 @@ class OverlayManager:
             if overlay.contains(overlay.mapFromScene(scene_pos)):
                 return overlay
         return None
+
+
+class SelectionManager:
+    """Handles rubber-band text selection and copy-to-clipboard."""
+
+    def __init__(self, scene: QGraphicsScene, overlay_manager: OverlayManager):
+        self._scene = scene
+        self._overlay_mgr = overlay_manager
+        self._selected: list[SpanOverlay] = []
+        self._highlight_rects: list[QGraphicsRectItem] = []
+
+    def select_rect(self, rect: QRectF, page_num: int):
+        """Select all spans on page_num whose bboxes intersect the given rect."""
+        self.clear_selection()
+        overlays = self._overlay_mgr.get_overlays(page_num)
+        for overlay in overlays:
+            item_rect = overlay.mapRectToScene(overlay.boundingRect())
+            if rect.intersects(item_rect):
+                self._selected.append(overlay)
+                highlight = QGraphicsRectItem(item_rect)
+                highlight.setPen(QPen(Qt.PenStyle.NoPen))
+                highlight.setBrush(QBrush(QColor(80, 130, 255, 60)))
+                highlight.setZValue(3)
+                self._scene.addItem(highlight)
+                self._highlight_rects.append(highlight)
+
+    def clear_selection(self):
+        """Remove all selection highlights."""
+        for rect in self._highlight_rects:
+            self._scene.removeItem(rect)
+        self._highlight_rects.clear()
+        self._selected.clear()
+
+    def selected_text(self) -> str:
+        """Return concatenated text of selected spans, sorted by y then x position."""
+        if not self._selected:
+            return ""
+        sorted_spans = sorted(
+            self._selected,
+            key=lambda ov: (ov.span_data["bbox"][1], ov.span_data["bbox"][0]),
+        )
+        return "\n".join(ov.span_text for ov in sorted_spans)
+
+    def has_selection(self) -> bool:
+        return len(self._selected) > 0
