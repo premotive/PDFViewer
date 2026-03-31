@@ -103,6 +103,14 @@ class MainWindow(QMainWindow):
 
         # UI setup
         self.setWindowTitle("PDF Viewer")
+
+        # Set app icon
+        icon_path = Path(__file__).parent / "icon.ico"
+        if icon_path.exists():
+            from PySide6.QtGui import QIcon
+            self.setWindowIcon(QIcon(str(icon_path)))
+            QApplication.instance().setWindowIcon(QIcon(str(icon_path)))
+
         self._setup_ui()
         self._setup_shortcuts()
         self._setup_connections()
