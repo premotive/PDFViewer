@@ -2,7 +2,9 @@
 
 import sys
 import os
+import socket
 import tempfile
+import threading
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -10,7 +12,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QInputDialog, QStatusBar, QGraphicsTextItem, QGraphicsRectItem,
     QLabel, QSpinBox,
 )
-from PySide6.QtCore import Qt, QTimer, QEvent, QRectF, QPointF
+from PySide6.QtCore import Qt, QTimer, QEvent, QRectF, QPointF, Slot
 from PySide6.QtGui import QAction, QColor, QKeySequence, QPen, QBrush, QShortcut
 
 from config import AppConfig, load_config, save_config, get_config_path, get_appdata_dir
@@ -25,6 +27,50 @@ from tab_manager import TabManager, TabState
 from library_sidebar import LibrarySidebar, LibraryData
 
 CONFIG_PATH = get_config_path()
+
+_LOCK_PORT = 47831  # Arbitrary port for single-instance lock
+
+
+def _send_to_running_instance(file_path: str) -> bool:
+    """Try to send a file path to an already-running instance. Returns True if successful."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1.0)
+        sock.connect(("127.0.0.1", _LOCK_PORT))
+        sock.sendall(file_path.encode("utf-8"))
+        sock.close()
+        return True
+    except (ConnectionRefusedError, OSError):
+        return False
+
+
+def _start_listener(window):
+    """Listen for file paths from new instances and open them as tabs."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server.bind(("127.0.0.1", _LOCK_PORT))
+    except OSError:
+        return
+    server.listen(5)
+    server.settimeout(1.0)
+
+    while True:
+        try:
+            conn, _ = server.accept()
+            data = conn.recv(4096).decode("utf-8").strip()
+            if data:
+                from PySide6.QtCore import QMetaObject, Qt, Q_ARG
+                QMetaObject.invokeMethod(
+                    window, "open_file_from_external",
+                    Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(str, data),
+                )
+            conn.close()
+        except socket.timeout:
+            continue
+        except OSError:
+            break
 
 
 class MainWindow(QMainWindow):
@@ -931,13 +977,31 @@ class MainWindow(QMainWindow):
                 tab.close()
         event.accept()
 
+    @Slot(str)
+    def open_file_from_external(self, path_str: str):
+        """Called from the socket listener when another instance sends a file path."""
+        self.open_file(Path(path_str))
+        self.raise_()
+        self.activateWindow()
+
 
 def main():
+    file_arg = sys.argv[1] if len(sys.argv) > 1 else ""
+
+    # Single-instance check
+    if file_arg and _send_to_running_instance(file_arg):
+        sys.exit(0)
+
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
-    if len(sys.argv) > 1:
-        window.open_file(Path(sys.argv[1]))
+
+    # Start listener for future instances
+    listener = threading.Thread(target=_start_listener, args=(window,), daemon=True)
+    listener.start()
+
+    if file_arg:
+        window.open_file(Path(file_arg))
     sys.exit(app.exec())
 
 
