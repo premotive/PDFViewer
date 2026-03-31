@@ -270,6 +270,14 @@ class PageRenderer(QObject):
         if result.generation < self._generation:
             return
 
+        # Guard: document may have been closed or page out of range
+        if not self._page_rects or result.page_num >= len(self._page_rects):
+            return
+
+        # Guard: page may have already been loaded by a duplicate result
+        if result.page_num in self._loaded_pages:
+            return
+
         if result.error:
             if result.page_num in self._placeholder_items:
                 placeholder = self._placeholder_items[result.page_num]

@@ -434,15 +434,15 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):
         if obj == self._renderer.view.viewport():
             if event.type() == QEvent.Type.MouseButtonDblClick:
-                scene_pos = self._renderer.view.mapToScene(event.pos())
+                scene_pos = self._renderer.view.mapToScene(event.position().toPoint())
                 self._handle_double_click(scene_pos)
                 return True
             elif event.type() == QEvent.Type.MouseButtonPress:
                 if event.button() == Qt.MouseButton.LeftButton:
-                    self._rubber_band_start = self._renderer.view.mapToScene(event.pos())
+                    self._rubber_band_start = self._renderer.view.mapToScene(event.position().toPoint())
             elif event.type() == QEvent.Type.MouseButtonRelease:
                 if event.button() == Qt.MouseButton.LeftButton and self._rubber_band_start is not None:
-                    end = self._renderer.view.mapToScene(event.pos())
+                    end = self._renderer.view.mapToScene(event.position().toPoint())
                     rect = QRectF(self._rubber_band_start, end).normalized()
                     if rect.width() > 5 and rect.height() > 5:
                         page_num = self._renderer.current_page()
