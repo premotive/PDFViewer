@@ -34,11 +34,12 @@ A `TabManager` class wrapping a `QTabBar` at the top of the window. Each tab own
 ### Behavior
 
 - Opening a PDF (file dialog, drag-drop, library click, CLI arg) creates a new tab
-- Each tab maintains its own: zoom level, scroll position, theme, edit state, undo/redo stack
+- Each tab maintains its own: zoom level, scroll position, edit state, undo/redo stack
+- Theme is app-wide (not per-tab) — changing theme affects all tabs
 - Closing a tab with unsaved edits prompts "Save changes?"
 - `+` button at the end of the tab bar opens a file dialog
 - Middle-click on a tab closes it
-- When all tabs are closed, the window shows an empty state with the library sidebar still visible
+- When all tabs are closed, the main area shows a centered prompt ("Open a PDF or drag one here") with the library sidebar still visible
 
 ### Keyboard Shortcuts
 
@@ -69,6 +70,10 @@ Each entry stores:
 - `thumb_path` — path to cached thumbnail image
 
 On startup, validate that files still exist. Mark missing files with a visual indicator (e.g., dimmed card) rather than removing them — the file might be on a disconnected drive.
+
+### Storage Location
+
+At runtime, `library.json`, `.thumbs/`, and `config.json` are stored in `%APPDATA%\PDFViewer\`. This works for both development (the app resolves the path at startup) and installed mode (where the install directory under `Program Files` is read-only).
 
 ### Library Cards
 
@@ -197,7 +202,7 @@ PDFViewer/
 ├── text_overlay.py      # UNCHANGED
 ├── search.py            # MINOR — connects to active tab
 ├── editor.py            # MINOR — connects to active tab
-├── render_worker.py     # UNCHANGED
+├── render_worker.py     # MINOR — each tab creates its own RenderWorker instance
 ├── theme_engine.py      # UNCHANGED
 ├── config.py            # MODIFIED — new keys for sidebar state, library path
 ├── config.json          # MODIFIED — new keys
