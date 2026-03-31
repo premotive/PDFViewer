@@ -12,7 +12,7 @@ class SpanOverlay(QGraphicsSimpleTextItem):
     """A text span overlay positioned on top of the PDF pixmap.
 
     In faithful mode: fully invisible, acts as hover/click target.
-    In reading mode: visible with theme's font color.
+    In reading mode: visible with color adapted for the theme background.
     """
 
     def __init__(self, span_data: dict, scale: float, page_num: int, parent=None):
@@ -74,17 +74,21 @@ class SpanOverlay(QGraphicsSimpleTextItem):
         self.setOpacity(0.0)
         self.setAcceptHoverEvents(True)
 
-    def set_reading_mode(self, font_color: QColor):
-        self.setOpacity(1.0)
-        self.setBrush(QBrush(font_color))
+    def set_reading_mode(self):
+        # Overlays stay invisible — the colour-transformed page image already
+        # renders text correctly.  Overlays exist only as hover/click targets.
+        self.setOpacity(0.0)
         self.setAcceptHoverEvents(True)
 
     def hoverEnterEvent(self, event):
-        if not self._is_editing:
+        if not self._is_editing and self.scene() is not None:
             if self._highlight is None:
-                self._highlight = QGraphicsRectItem(self.boundingRect(), self)
+                scene_rect = self.mapRectToScene(self.boundingRect())
+                self._highlight = QGraphicsRectItem(scene_rect)
                 self._highlight.setPen(QPen(Qt.PenStyle.NoPen))
-            self._highlight.setBrush(QBrush(QColor(100, 150, 255, 40)))
+                self._highlight.setZValue(1.5)
+                self.scene().addItem(self._highlight)
+            self._highlight.setBrush(QBrush(QColor(100, 150, 255, 70)))
             self._highlight.show()
         super().hoverEnterEvent(event)
 
@@ -92,6 +96,12 @@ class SpanOverlay(QGraphicsSimpleTextItem):
         if self._highlight:
             self._highlight.hide()
         super().hoverLeaveEvent(event)
+
+    def cleanup_highlight(self):
+        """Remove the hover highlight from the scene."""
+        if self._highlight and self.scene() is not None:
+            self.scene().removeItem(self._highlight)
+            self._highlight = None
 
 
 class OverlayManager:
@@ -115,8 +125,16 @@ class OverlayManager:
     def get_overlays(self, page_num: int) -> list[SpanOverlay]:
         return self._overlays.get(page_num, [])
 
+    def get_block_overlays(self, page_num: int, block_num: int) -> list[SpanOverlay]:
+        """Return all overlays on a page that belong to the given block number."""
+        return [
+            ov for ov in self._overlays.get(page_num, [])
+            if ov.span_data["block_num"] == block_num
+        ]
+
     def clear_page(self, page_num: int):
         for overlay in self._overlays.pop(page_num, []):
+            overlay.cleanup_highlight()
             self._scene.removeItem(overlay)
 
     def clear_all(self):
@@ -128,10 +146,10 @@ class OverlayManager:
             for overlay in overlays:
                 overlay.set_faithful_mode()
 
-    def set_reading_mode(self, font_color: QColor):
+    def set_reading_mode(self):
         for overlays in self._overlays.values():
             for overlay in overlays:
-                overlay.set_reading_mode(font_color)
+                overlay.set_reading_mode()
 
     def find_overlay_at(self, page_num: int, scene_pos) -> SpanOverlay | None:
         for overlay in self._overlays.get(page_num, []):
@@ -159,7 +177,7 @@ class SelectionManager:
                 self._selected.append(overlay)
                 highlight = QGraphicsRectItem(item_rect)
                 highlight.setPen(QPen(Qt.PenStyle.NoPen))
-                highlight.setBrush(QBrush(QColor(80, 130, 255, 60)))
+                highlight.setBrush(QBrush(QColor(80, 130, 255, 90)))
                 highlight.setZValue(3)
                 self._scene.addItem(highlight)
                 self._highlight_rects.append(highlight)

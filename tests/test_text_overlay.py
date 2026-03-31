@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QGraphicsScene
 from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QFont
 from text_overlay import SpanOverlay, OverlayManager
 
 
@@ -28,7 +28,9 @@ def test_span_overlay_invisible_by_default(qapp):
     assert overlay.opacity() == 0.0
 
 
-def test_span_overlay_visible_in_reading_mode(qapp):
+def test_span_overlay_invisible_in_reading_mode(qapp):
+    """Overlays stay invisible in reading mode — the colour-transformed page
+    image renders text directly.  Overlays are only hit-test targets."""
     scene = QGraphicsScene()
     span_data = {
         "text": "Test", "bbox": (72, 60, 200, 80), "font": "Helvetica",
@@ -36,8 +38,9 @@ def test_span_overlay_visible_in_reading_mode(qapp):
     }
     overlay = SpanOverlay(span_data, scale=150 / 72.0, page_num=0)
     scene.addItem(overlay)
-    overlay.set_reading_mode(QColor("#D4D4D4"))
-    assert overlay.opacity() == 1.0
+    overlay.set_reading_mode()
+    assert overlay.opacity() == 0.0
+    assert overlay.acceptHoverEvents()
 
 
 def test_overlay_manager_creates_spans(qapp):
@@ -73,3 +76,24 @@ def test_span_overlay_span_id(qapp):
     }
     overlay = SpanOverlay(span_data, scale=1.0, page_num=5)
     assert overlay.span_id == (5, (1, 2, 3))
+
+
+def test_get_block_overlays(qapp):
+    scene = QGraphicsScene()
+    manager = OverlayManager(scene)
+    spans = [
+        {"text": "Block0 Line1", "bbox": (72, 60, 200, 80), "font": "Helvetica",
+         "size": 12.0, "color": 0, "flags": 0, "block_num": 0, "line_num": 0, "span_num": 0},
+        {"text": "Block0 Line2", "bbox": (72, 85, 200, 105), "font": "Helvetica",
+         "size": 12.0, "color": 0, "flags": 0, "block_num": 0, "line_num": 1, "span_num": 0},
+        {"text": "Block1 Line1", "bbox": (72, 200, 200, 220), "font": "Helvetica",
+         "size": 12.0, "color": 0, "flags": 0, "block_num": 1, "line_num": 0, "span_num": 0},
+    ]
+    manager.create_overlays(spans, scale=1.0, page_num=0, y_offset=0.0)
+    block_0 = manager.get_block_overlays(0, 0)
+    assert len(block_0) == 2
+    assert all(ov.span_data["block_num"] == 0 for ov in block_0)
+    block_1 = manager.get_block_overlays(0, 1)
+    assert len(block_1) == 1
+    empty = manager.get_block_overlays(0, 99)
+    assert len(empty) == 0
