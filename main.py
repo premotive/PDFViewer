@@ -6,17 +6,17 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget, QFileDialog,
-    QMessageBox, QInputDialog, QStatusBar, QGraphicsTextItem,
+    QMessageBox, QInputDialog, QStatusBar, QGraphicsTextItem, QGraphicsRectItem,
 )
-from PySide6.QtCore import Qt, QTimer, QEvent, QRectF
-from PySide6.QtGui import QAction, QKeySequence, QUndoStack
+from PySide6.QtCore import Qt, QTimer, QEvent, QRectF, QPointF
+from PySide6.QtGui import QAction, QColor, QKeySequence, QUndoStack, QPen, QBrush
 
 from config import AppConfig, load_config, save_config
 from pdf_engine import PDFEngine
 from page_renderer import PageRenderer
 from text_overlay import SpanOverlay, SelectionManager
 from theme_engine import ThemeEngine
-from editor import EditTracker, SpanEditCommand
+from editor import EditTracker, BlockEditCommand
 from search import SearchEngine, SearchBar
 from toolbar import ToolBar
 
@@ -257,7 +257,8 @@ class MainWindow(QMainWindow):
     def _save_to(self, path: Path):
         try:
             edits = self._edit_tracker.dirty_edits
-            if not edits:
+            block_edits = self._edit_tracker.dirty_block_edits
+            if not edits and not block_edits:
                 return
 
             temp_dir = path.parent
@@ -277,7 +278,7 @@ class MainWindow(QMainWindow):
                 tmp.close()
                 path = Path(alt_path)
 
-            warnings = self._main_engine.save_edits(edits, tmp_path)
+            warnings = self._main_engine.save_edits(edits, tmp_path, block_edits=block_edits)
 
             self._main_engine.close()
             self._renderer.close_document()
@@ -416,10 +417,10 @@ class MainWindow(QMainWindow):
                 highlight = QGraphicsRectItem(scene_rect)
                 highlight.setPen(QPen(Qt.PenStyle.NoPen))
                 if i == index:
-                    highlight.setBrush(QBrush(QColor(255, 165, 0, 100)))
+                    highlight.setBrush(QBrush(self._search_color_active()))
                     self._current_highlight = highlight
                 else:
-                    highlight.setBrush(QBrush(QColor(255, 255, 0, 80)))
+                    highlight.setBrush(QBrush(self._search_color_other()))
                 highlight.setZValue(2.5)
                 self._renderer.scene.addItem(highlight)
                 self._search_highlights.append(highlight)
@@ -429,6 +430,18 @@ class MainWindow(QMainWindow):
             self._renderer.scene.removeItem(h)
         self._search_highlights.clear()
         self._current_highlight = None
+
+    def _search_color_active(self) -> QColor:
+        """Active search-match highlight, adapted for the current theme."""
+        if self._theme_engine.bg_color.lightnessF() < 0.5:
+            return QColor(255, 165, 0, 140)   # brighter orange on dark bg
+        return QColor(255, 165, 0, 100)
+
+    def _search_color_other(self) -> QColor:
+        """Other search-match highlight, adapted for the current theme."""
+        if self._theme_engine.bg_color.lightnessF() < 0.5:
+            return QColor(255, 255, 0, 110)    # brighter yellow on dark bg
+        return QColor(255, 255, 0, 80)
 
     # --- Edit mode ---
     def eventFilter(self, obj, event):
@@ -447,106 +460,211 @@ class MainWindow(QMainWindow):
                     if rect.width() > 5 and rect.height() > 5:
                         page_num = self._renderer.current_page()
                         self._selection_manager.select_rect(rect, page_num)
+                    else:
+                        self._selection_manager.clear_selection()
                     self._rubber_band_start = None
         return super().eventFilter(obj, event)
 
     def _handle_double_click(self, scene_pos):
         page_num = self._renderer.current_page()
-        overlays = self._renderer.overlay_manager.get_overlays(page_num)
-        for overlay in overlays:
-            item_pos = overlay.mapFromScene(scene_pos)
-            if overlay.boundingRect().contains(item_pos):
-                self._enter_edit_mode(overlay)
-                return
+        overlay = self._renderer.overlay_manager.find_overlay_at(page_num, scene_pos)
+        if overlay is not None:
+            block_num = overlay.span_data["block_num"]
+            self._enter_block_edit_mode(block_num, page_num, scene_pos)
 
-    def _enter_edit_mode(self, overlay: SpanOverlay):
-        edit_item = QGraphicsTextItem(overlay.span_text)
-        edit_item.setFont(overlay.font())
-        edit_item.setPos(overlay.pos())
-        edit_item.setZValue(overlay.zValue() + 1)
+    def _enter_block_edit_mode(self, block_num: int, page_num: int, click_scene_pos):
+        if self._active_edit is not None:
+            self._exit_edit_mode()
+
+        blocks = self._main_engine.extract_blocks(page_num)
+        block_data = None
+        for b in blocks:
+            if b["block_num"] == block_num:
+                block_data = b
+                break
+        if block_data is None or not block_data["text"].strip():
+            return
+
+        max_rect = self._main_engine.compute_max_block_rect(page_num, block_num)
+
+        # Set editing flag and hide all block overlays
+        block_overlays = self._renderer.overlay_manager.get_block_overlays(page_num, block_num)
+        for ov in block_overlays:
+            ov._is_editing = True
+            ov.hide()
+
+        scale = self._renderer._scale
+        y_offset = self._renderer._page_y_offsets[page_num] if page_num < len(self._renderer._page_y_offsets) else 0
+        bbox = block_data["bbox"]
+
+        # Draw dashed boundary showing available space
+        boundary = None
+        if max_rect:
+            boundary_rect = QRectF(
+                max_rect[0] * scale, max_rect[1] * scale + y_offset,
+                (max_rect[2] - max_rect[0]) * scale, (max_rect[3] - max_rect[1]) * scale,
+            )
+            boundary = QGraphicsRectItem(boundary_rect)
+            pen = QPen(QColor(
+                self._theme_engine.font_color.red(),
+                self._theme_engine.font_color.green(),
+                self._theme_engine.font_color.blue(),
+                100,
+            ))
+            pen.setStyle(Qt.PenStyle.DashLine)
+            pen.setWidthF(1.0)
+            boundary.setPen(pen)
+            boundary.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            boundary.setZValue(2.5)
+            self._renderer.scene.addItem(boundary)
+
+        # Create edit text item
+        edit_item = QGraphicsTextItem(block_data["text"])
+        font = edit_item.font()
+        font.setPointSizeF(block_data["dominant_size"] * scale * 0.75)
+        dom_flags = block_data["dominant_flags"]
+        if dom_flags & (1 << 4):
+            font.setBold(True)
+        if dom_flags & (1 << 1):
+            font.setItalic(True)
+        if dom_flags & (1 << 3):
+            font.setFamily("Courier")
+        edit_item.setFont(font)
+        edit_item.setPos(bbox[0] * scale, bbox[1] * scale + y_offset)
+        edit_item.setTextWidth((bbox[2] - bbox[0]) * scale)
+        edit_item.setZValue(3)
         edit_item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
         edit_item.setDefaultTextColor(
-            self._theme_engine.font_color if self._theme_engine.show_text_overlays else Qt.GlobalColor.black
+            self._theme_engine.font_color if self._theme_engine.show_text_overlays else QColor(0, 0, 0)
         )
 
         self._renderer.scene.addItem(edit_item)
         edit_item.setFocus()
-        overlay.hide()
+
+        # Position cursor near click location
+        local_pos = edit_item.mapFromScene(click_scene_pos)
+        cursor_pos = edit_item.document().documentLayout().hitTest(local_pos, Qt.HitTestAccuracy.FuzzyHit)
+        if cursor_pos >= 0:
+            cursor = edit_item.textCursor()
+            cursor.setPosition(cursor_pos)
+            edit_item.setTextCursor(cursor)
 
         self._active_edit = {
-            "overlay": overlay,
+            "type": "block",
+            "block_num": block_num,
+            "page_num": page_num,
+            "block_data": block_data,
+            "max_rect": max_rect,
             "edit_item": edit_item,
-            "original_text": overlay.span_text,
+            "boundary": boundary,
+            "overlays": block_overlays,
+            "original_text": block_data["text"],
         }
 
-        # Handle Tab and Escape
+        # Key handling: Escape = discard, Tab = save + next block
         original_key_press = edit_item.keyPressEvent
+
         def custom_key_press(event):
             if event.key() == Qt.Key.Key_Escape:
-                self._exit_edit_mode()
+                self._discard_edit()
             elif event.key() == Qt.Key.Key_Tab:
                 self._exit_edit_mode()
-                self._advance_to_next_span(overlay)
+                self._advance_to_next_block(page_num, block_num)
             else:
                 original_key_press(event)
-        edit_item.keyPressEvent = custom_key_press
 
+        edit_item.keyPressEvent = custom_key_press
         edit_item.focusOutEvent = lambda e: self._exit_edit_mode()
-        self._status_bar.showMessage("Editing — press Escape to finish")
+        self._status_bar.showMessage("Editing paragraph \u2014 Escape to discard, click away to save")
 
     def _exit_edit_mode(self):
+        """Save changes and exit edit mode."""
         if self._active_edit is None:
             return
 
         edit_data = self._active_edit
         self._active_edit = None
 
-        overlay = edit_data["overlay"]
         edit_item = edit_data["edit_item"]
-        original_text = edit_data["original_text"]
         new_text = edit_item.toPlainText()
+        original_text = edit_data["original_text"]
 
+        # Clean up scene items
         self._renderer.scene.removeItem(edit_item)
-        overlay.show()
+        if edit_data.get("boundary"):
+            self._renderer.scene.removeItem(edit_data["boundary"])
+
+        # Restore overlays
+        for ov in edit_data["overlays"]:
+            ov._is_editing = False
+            ov.show()
 
         if new_text != original_text:
-            overlay.span_text = new_text
-            span_data = overlay.span_data
-            cmd = SpanEditCommand(
+            block_data = edit_data["block_data"]
+            cmd = BlockEditCommand(
                 tracker=self._edit_tracker,
-                span_id=overlay.span_id,
+                page_num=edit_data["page_num"],
+                block_num=edit_data["block_num"],
                 old_text=original_text,
                 new_text=new_text,
-                original_rect=span_data["bbox"],
-                font=span_data["font"],
-                size=span_data["size"],
-                color=span_data["color"],
-                flags=span_data["flags"],
-                text_updater=self._update_span_text,
+                block_bbox=block_data["bbox"],
+                extended_bbox=edit_data["max_rect"],
+                font=block_data["dominant_font"],
+                size=block_data["dominant_size"],
+                color=block_data["dominant_color"],
+                flags=block_data["dominant_flags"],
+                align=block_data["align"],
+                text_updater=self._update_block_text,
             )
             self._undo_stack.push(cmd)
             self._on_dirty_changed(self._edit_tracker.is_dirty)
 
         self._status_bar.showMessage("Ready")
 
-    def _advance_to_next_span(self, current_overlay: SpanOverlay):
-        page_num = current_overlay.page_num
-        overlays = self._renderer.overlay_manager.get_overlays(page_num)
-        sorted_overlays = sorted(
-            overlays, key=lambda ov: (ov.span_data["bbox"][1], ov.span_data["bbox"][0])
-        )
-        for i, ov in enumerate(sorted_overlays):
-            if ov.span_id == current_overlay.span_id:
-                if i + 1 < len(sorted_overlays):
-                    self._enter_edit_mode(sorted_overlays[i + 1])
+    def _discard_edit(self):
+        """Discard changes and exit edit mode (Escape key)."""
+        if self._active_edit is None:
+            return
+
+        edit_data = self._active_edit
+        self._active_edit = None
+
+        self._renderer.scene.removeItem(edit_data["edit_item"])
+        if edit_data.get("boundary"):
+            self._renderer.scene.removeItem(edit_data["boundary"])
+
+        for ov in edit_data["overlays"]:
+            ov._is_editing = False
+            ov.show()
+
+        self._status_bar.showMessage("Edit discarded")
+
+    def _advance_to_next_block(self, page_num: int, current_block_num: int):
+        """Tab: save current block edit and open the next block for editing."""
+        blocks = self._main_engine.extract_blocks(page_num)
+        sorted_blocks = sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
+        for i, b in enumerate(sorted_blocks):
+            if b["block_num"] == current_block_num:
+                if i + 1 < len(sorted_blocks):
+                    next_b = sorted_blocks[i + 1]
+                    scale = self._renderer._scale
+                    y_offset = self._renderer._page_y_offsets[page_num] if page_num < len(self._renderer._page_y_offsets) else 0
+                    click_pos = QPointF(
+                        next_b["bbox"][0] * scale,
+                        next_b["bbox"][1] * scale + y_offset,
+                    )
+                    self._enter_block_edit_mode(next_b["block_num"], page_num, click_pos)
                 return
 
-    def _update_span_text(self, span_id, text):
-        page_num = span_id[0]
-        for overlay in self._renderer.overlay_manager.get_overlays(page_num):
-            if overlay.span_id == span_id:
-                overlay.span_text = text
-                break
+    def _update_block_text(self, page_num: int, block_num: int, text: str):
+        """Update overlay texts for a block after undo/redo."""
+        block_overlays = self._renderer.overlay_manager.get_block_overlays(page_num, block_num)
+        lines = text.split("\n")
+        for i, ov in enumerate(block_overlays):
+            if i < len(lines):
+                ov.span_text = lines[i]
+            else:
+                ov.span_text = ""
         self._on_dirty_changed(self._edit_tracker.is_dirty)
 
     def _copy_selection(self):
